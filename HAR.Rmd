@@ -1,0 +1,236 @@
+---
+title: "Human Activity Recognition"
+author: "K. MacAvaney"
+date: "May 23, 2016"
+output: html_document
+fontsize: 11pt
+---
+
+```{r global_options, include = FALSE}
+knitr::opts_chunk$set(fig.width = 6, fig.height = 4, echo = TRUE, warning = FALSE)
+```
+
+### Overview
+*In this project, I explore a dataset taken from subjects wearing several sensors while lifting dumbbells. The goal is to see if I can predict if a subject is performing the exercise correctly, or if they're making one of 4 common mistakes.*
+
+*Note: please see Appendix at the end of this document for code*
+
+### Setup, preprocessing, & variable selection
+
+First I call appropriate libraries and download the training and testing datasets.
+
+```{r ref.label = "setup", echo = FALSE, warning = FALSE}
+```
+
+Next I take a look at the data.
+
+```{r ref.label = "viewdata", echo = FALSE, warning = FALSE}
+```
+
+This is a large dataset with many variables. I can see that there are a several variables that appear to only contain NAs. There are also a couple variables that are just timestamps, and a couple that I'm pretty sure are not sensor related. 
+
+A couple factor variables are giving me pause too. Some look like they should be numeric variables but they have blanks instead of NA. And others only have two or three levels (for instance, kurtosis_yaw_belt only contains blanks and some sort of error message). I take a look at kurtosis_roll_belt, a factor variable of more than 3 levels, to see if there's any possible reason for this to be a factor variable.
+
+```{r ref.label = "kurtosis", echo = FALSE, warning = FALSE}
+```
+
+As I suspected, it's mostly blanks. This isn't going to be useful in my model.
+
+So the first goal will be to cut down some non-essential variables. I'm going to remove those that are all NA, all factor variables, and the timestamps/non sensor variables.
+
+I'll see how many variables are left:
+
+```{r ref.label = "exclude", echo = FALSE, warning = FALSE}
+```
+
+There are still too many variables to model in a time efficient manner. But I don't have the knowledge to cut them down further. 
+
+Per the [source](http://groupware.les.inf.puc-rio.br/har) of the dataset, the mistakes that are being measured are as follows:
+* A: No issues
+* B: Elbows to front
+* C: Lift dumbbells halfway
+* D: Lower dumbbells halfway
+* E: Throw hips to front
+
+Although I'm not an expert, as someone who understands very basic human anatomy, I suspect that only certain variables are going to be indicators of certain mistakes. For instance, I doubt someone committing Error E is going to display abnormal forearm movement.
+
+So I'm going to model each specific error against its corresponding set of variables (anything with "arm" for Error B, and so on). I'm choosing the boosting method because it takes lots of weak predictors and weights them. I imagine lots of these variables are pretty weak individually, so I want to find the most influential among them to keep for the main model.
+
+```{r ref.label = "submodels", echo = FALSE, warning = FALSE}
+```
+
+I can see which variables are most influential using varImp. Doing this to each sub-model helps me identify which variables are good to keep for the larger model. Because varImp scales model importance, I am going to use all variables of importance 80 and above across the board.
+
+At the end of this process, I'm left with the following 7 variables:
+
+```{r ref.label = "varimp", echo = FALSE, warning = FALSE}
+```
+
+Not only is this number of variables much more manageable, I know all of them are important flags for at least one mistake. 
+
+### Fitting the final model
+
+Now that I have some variables I know are important, I'm going to fit a couple overall models for this dataset, then look at the confusion matrix of each one to see which is the most accurate.
+
+First, the gbm model:
+
+```{r ref.label = "gbm", echo = FALSE, warning = FALSE}
+```
+
+88% accuracy is not bad.
+
+Next, the random forest model:
+
+```{r ref.label = "rf", echo = FALSE, warning = FALSE}
+```
+
+The random forest model performed much better, with 96% accuracy.
+
+### Testing the model
+
+Finally, I test the model on the "test" dataset to predict the classe for each instance:
+
+```{r ref.label = "test", echo = FALSE, warning = FALSE}
+```
+
+# Appendix
+```{r setup, echo = TRUE, eval = FALSE}
+library(caret)
+library(plyr)
+library(dplyr)
+```
+
+```{r viewdata, echo = TRUE, eval = FALSE}
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", 
+              destfile = "train.csv")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", 
+              destfile = "test.csv")
+
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+
+dim(train)
+str(train, list.len = 20)
+```
+
+```{r kurtosis, echo = TRUE, eval = FALSE}
+# Take a closer look at one of the weird factor variables
+head(table(train$kurtosis_roll_belt))
+```
+
+```{r exclude, echo = TRUE, eval = FALSE}
+# List the variable types I think can be excluded
+exclude <- c()
+for (i in 1:length(names(train))){
+        if (sum(is.na(train[,i])) > 0) {
+                exclude <- c(exclude, i)
+        }
+        else if (class(train[,i]) == "factor") {
+                exclude <- c(exclude, i)
+        }
+        else if (i < 8) {exclude <- c(exclude, i)}
+}
+
+# Keep classe, which is a factor variable, even though I'm getting rid of other factor variables
+exclude <- exclude[which(exclude!=160)]
+
+# Apply excludions to dataset
+train_2 <- train[,-exclude]
+
+dim(train_2)
+```
+
+```{r submodels, echo = TRUE, eval = FALSE}
+# Create dummy variables for each individual error (1 for present, 0 for absent)
+train_2$classe <- as.character(train_2$classe)
+
+for (i in unique(train_2$classe)) {
+        train_2[paste("type", i, sep="_")] <-
+                as.factor(ifelse(train_2$classe == i, 1, 0))
+}
+
+# Subset data into groups based on which variables are probably going to indicate that the error is present
+b <- train_2[, grepl("arm", names(train_2))]
+b <- cbind(b, B = train_2$type_B)
+c <- train_2[, grepl("dumbbell", names(train_2))]
+c <- cbind(c, C = train_2$type_C)
+d <- train_2[, grepl("dumbbell", names(train_2))]
+d <- cbind(d, D = train_2$type_D)
+e <- train_2[, grepl("belt", names(train_2))]
+e <- cbind(e, E = train_2$type_E)
+
+# Model each error group individually:
+mod_b <- train(B ~ ., method = "gbm",
+               trControl = trainControl(method = "cv", number = 3),
+               data = b, verbose = FALSE)
+mod_c <- train(C ~ ., method = "gbm", 
+               trControl = trainControl(method = "cv", number = 3),
+               data = c, verbose = FALSE)
+mod_d <- train(D ~ ., method = "gbm", 
+               trControl = trainControl(method = "cv", number = 3),
+               data = d, verbose = FALSE)
+mod_e <- train(E ~ ., method = "gbm", 
+               trControl = trainControl(method = "cv", number = 3),
+               data = e, verbose = FALSE)
+```
+
+```{r varimp, echo = TRUE, eval = FALSE}
+# Identify the most important variables per each sub-model
+vari_b <- data.frame(varImp(mod_b)$importance)
+vari_b$variables <- rownames(vari_b)
+incl_b <- vari_b[which(vari_b$Overall > 80), 2]
+
+vari_c <- data.frame(varImp(mod_c)$importance)
+vari_c$variables <- rownames(vari_c)
+incl_c <- vari_c[which(vari_c$Overall > 80), 2]
+
+vari_d <- data.frame(varImp(mod_d)$importance)
+vari_d$variables <- rownames(vari_d)
+incl_d <- vari_d[which(vari_d$Overall > 80), 2]
+
+vari_e <- data.frame(varImp(mod_e)$importance)
+vari_e$variables <- rownames(vari_e)
+incl_e <- vari_e[which(vari_e$Overall > 80), 2]
+
+# Put important variables into a vector to subset train & test datasets
+vars <- c()
+vars <- c(vars, incl_b, incl_c, incl_d, incl_e)
+vars <- unique(vars)
+
+vars
+
+# Select only the important variables
+train_3 <- cbind(train_2[,vars], classe = train_2$classe)
+```
+
+```{r gbm, echo = TRUE, eval = FALSE}
+mod_gbm <- train(classe ~ ., method = "gbm", 
+               trControl = trainControl(method = "cv", number = 3),
+               data = train_3, verbose = FALSE)
+pred_gbm <- predict(mod_gbm, train_3)
+confusionMatrix(pred_gbm, train_3$classe) 
+```
+
+```{r rf, echo = TRUE, eval = FALSE}
+mod_rf <- train(classe ~ ., method = "rf", 
+               trControl = trainControl(method = "cv", number = 3),
+               data = train_3)
+pred_rf <- predict(mod_rf$finalModel)
+
+confusionMatrix(pred_rf, train_3$classe) 
+```
+
+```{r test, echo = TRUE, eval = FALSE}
+mod <- mod_rf$finalModel
+
+# Select only the important variables
+test_2 <- test[,vars]
+
+# Come up with predicted classe for the test dataset
+pred_test <- predict(mod, test_2)
+
+pred_test
+```
+
+
+
